@@ -1,0 +1,56 @@
+{
+  "abi": 1,
+  "baseline": {
+    "bootstrap_commit": "2b5bee88529c0813cec600cd185f84e7944a6b21",
+    "bootstrap_version": "v1.0b7",
+    "kernel_commit": "374d5b188f183846a81b98ec7c5a10da69625ea6",
+    "kernel_version": "r0.94-v1.0b2"
+  },
+  "device": "tangorpro",
+  "kernel": {
+    "gs201": {
+      "base_revision": "966a2828ccce06078e59e7374c9c68cbe6089004",
+      "patch": "kernel/gs201/0001-enable-treeforge-bootstrap-framebuffer.patch",
+      "sha256": "1c9cd8b5e12a7621c68b032acbed011f0ef8b44048c4c68f8ffbe89e871a1d4b"
+    },
+    "kernel_common": {
+      "base_revision": "3c76c2d71bb32039037c6f5dc38b172fe4142bdb",
+      "patch": "kernel/kernel-common/0001-treeforge-bootstrap-framebuffer.patch",
+      "sha256": "44cb664566f2f364e84eedb55a51183861bc3a1d4270541f52838642b2ea2093"
+    }
+  },
+  "ownership": {
+    "kernel_consumer": "treeforge_kernel",
+    "repository": "TreeForgeDEV/treeforge_bootstrap_framebuffer",
+    "userspace_consumer": "treeforge_bootstrap"
+  },
+  "platform": {
+    "android_build": "BP1A.250505.005.D1",
+    "android_release": "android-15.0.0_r36",
+    "soc": "gs201"
+  },
+  "provider": "treeforge_bootstrap_framebuffer",
+  "schema_version": 1,
+  "userspace": {
+    "contract": {
+      "device": "/dev/treeforge_bootstrap_fb",
+      "info_bytes": 64,
+      "required_flags": [
+        "linear",
+        "write_combine"
+      ],
+      "seal_ioctl": "0x5001",
+      "sysfs_dev": "/sys/class/misc/treeforge_bootstrap_fb/dev"
+    },
+    "integration": "textual-c-fragment",
+    "primitives": {
+      "path": "userspace/consumer-primitives-v1.inc",
+      "sha256": "fa37265a0ad2d82ca97933e523c43626f813b6593a468af4f35fe72ef9ce3fc0"
+    },
+    "transport": {
+      "path": "userspace/consumer-transport-v1.inc",
+      "sha256": "62a2c5d045bd27653aa92a33f061569a7a6f0591ee8c60aa1e69645548b74684"
+    }
+  },
+  "version": "v1.0b1"
+}

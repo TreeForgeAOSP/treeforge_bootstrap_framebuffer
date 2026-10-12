@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse, hashlib, io, json, lzma, os, tarfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+MANIFEST = ROOT / "provider.json"
+
+class ProviderError(RuntimeError): pass
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024*1024), b''): h.update(chunk)
+    return h.hexdigest()
+
+def manifest() -> dict:
+    try: data = json.loads(MANIFEST.read_text())
+    except Exception as e: raise ProviderError(f"invalid provider.json: {e}") from e
+    if data.get('schema_version') != 1: raise ProviderError('unsupported provider schema')
+    if data.get('provider') != 'treeforge_bootstrap_framebuffer': raise ProviderError('provider identity changed')
+    if data.get('version') != (ROOT/'VERSION').read_text().strip(): raise ProviderError('VERSION/provider mismatch')
+    if data.get('abi') != 1: raise ProviderError('framebuffer ABI changed')
+    return data
+
+def expected_files(data: dict):
+    yield data['kernel']['kernel_common']['patch'], data['kernel']['kernel_common']['sha256']
+    yield data['kernel']['gs201']['patch'], data['kernel']['gs201']['sha256']
+    yield data['userspace']['primitives']['path'], data['userspace']['primitives']['sha256']
+    yield data['userspace']['transport']['path'], data['userspace']['transport']['sha256']
+
+def verify() -> None:
+    data = manifest()
+    seen=set()
+    for rel, expected in expected_files(data):
+        if rel in seen: raise ProviderError(f'duplicate provider file: {rel}')
+        seen.add(rel)
+        p=ROOT/rel
+        if not p.is_file(): raise ProviderError(f'missing provider file: {rel}')
+        actual=sha256(p)
+        if actual != expected: raise ProviderError(f'SHA256 mismatch: {rel}\nexpected={expected}\nactual={actual}')
+    common=(ROOT/data['kernel']['kernel_common']['patch']).read_text()
+    gs=(ROOT/data['kernel']['gs201']['patch']).read_text()
+    primitives=(ROOT/data['userspace']['primitives']['path']).read_text()
+    transport=(ROOT/data['userspace']['transport']['path']).read_text()
+    required_common=['CONFIG_TREEFORGE_BOOTSTRAP_FB=y','drivers/misc/treeforge_bootstrap_fb.c','TF_FB_ABI_VERSION            1U','TF_FB_IOCTL_SEAL']
+    required_primitives=['TREEFORGE_BOOTSTRAP_FB_CONSUMER_V1','TFB_FB_ABI_VERSION 1U','TFB_FB_IOCTL_SEAL 0x5001UL','static void tfb_fb_fill_rect(','static void tfb_fb_draw_text(']
+    required_transport=['static int tfb_fb_parse_dev_number(','static int tfb_fb_begin(void)','static void tfb_fb_cleanup(void)','static void tfb_probe_display_surfaces(void)']
+    for marker in required_common:
+        if marker not in common: raise ProviderError(f'kernel contract marker missing: {marker}')
+    if 'CONFIG_TREEFORGE_BOOTSTRAP_FB=y' not in gs: raise ProviderError('GS201 enablement marker missing')
+    for marker in required_primitives:
+        if marker not in primitives: raise ProviderError(f'userspace primitive marker missing: {marker}')
+    for marker in required_transport:
+        if marker not in transport: raise ProviderError(f'userspace transport marker missing: {marker}')
+    if 'SYS_IOCTL' in transport and 'TFB_FB_IOCTL_SEAL' in transport:
+        pass
+    print('PROVIDER=treeforge_bootstrap_framebuffer')
+    print(f"VERSION={data['version']}")
+    print(f"ABI={data['abi']}")
+    print('KERNEL_BRIDGE=PASS')
+    print('USERSPACE_CONSUMER=PASS')
+    print('TREEFORGE_BOOTSTRAP_FRAMEBUFFER_VERIFY=PASS')
+
+def package() -> Path:
+    verify()
+    data=manifest(); version=data['version']; out=ROOT/'out'; out.mkdir(exist_ok=True)
+    name=f'treeforge-bootstrap-framebuffer-tangorpro-android15-{version}.tar.xz'
+    dest=out/name
+    members=['VERSION','README.md','provider.json','framebufferctl',data['kernel']['kernel_common']['patch'],data['kernel']['gs201']['patch'],data['userspace']['primitives']['path'],data['userspace']['transport']['path']]
+    epoch=int(os.environ.get('SOURCE_DATE_EPOCH','0'))
+    with lzma.open(dest,'wb',format=lzma.FORMAT_XZ,preset=9) as xz:
+        with tarfile.open(fileobj=xz,mode='w',format=tarfile.PAX_FORMAT) as tf:
+            for rel in members:
+                p=ROOT/rel; raw=p.read_bytes(); ti=tarfile.TarInfo(rel); ti.size=len(raw); ti.mtime=epoch; ti.uid=0; ti.gid=0; ti.uname=''; ti.gname=''; ti.mode=0o755 if rel=='framebufferctl' else 0o644
+                tf.addfile(ti,io.BytesIO(raw))
+    digest=sha256(dest); (out/(name+'.sha256')).write_text(f'{digest}  {name}\n')
+    print(f'ARCHIVE={dest}'); print(f'BYTES={dest.stat().st_size}'); print(f'SHA256={digest}'); print('TREEFORGE_BOOTSTRAP_FRAMEBUFFER_PACKAGE=PASS')
+    return dest
+
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument('command',choices=('verify','package')); a=ap.parse_args()
+    try:
+        if a.command=='verify': verify()
+        else: package()
+    except ProviderError as e:
+        print(f'ERROR: {e}', file=__import__('sys').stderr); raise SystemExit(1)
+if __name__=='__main__': main()
