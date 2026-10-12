@@ -1,88 +1,363 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, hashlib, io, json, lzma, os, tarfile
+
+import argparse
+import hashlib
+import io
+import json
+import lzma
+import os
 from pathlib import Path
+import re
+import tarfile
+
 
 ROOT = Path(__file__).resolve().parent
+VERSION_FILE = ROOT / "VERSION"
+README = ROOT / "README.md"
 MANIFEST = ROOT / "provider.json"
+SUMS = ROOT / "SHA256SUMS"
+RELEASE_ROOT = ROOT / ".release"
+PROVIDER_NAME = "treeforge_bootstrap_framebuffer"
+PROVIDER_ABI = 1
+VERSION_RE = re.compile(r"v1\.0b[0-9]+")
 
-class ProviderError(RuntimeError): pass
+
+class ProviderError(RuntimeError):
+    pass
+
 
 def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open('rb') as f:
-        for chunk in iter(lambda: f.read(1024*1024), b''): h.update(chunk)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
-def manifest() -> dict:
-    try: data = json.loads(MANIFEST.read_text())
-    except Exception as e: raise ProviderError(f"invalid provider.json: {e}") from e
-    if data.get('schema_version') != 1: raise ProviderError('unsupported provider schema')
-    if data.get('provider') != 'treeforge_bootstrap_framebuffer': raise ProviderError('provider identity changed')
-    if data.get('version') != (ROOT/'VERSION').read_text().strip(): raise ProviderError('VERSION/provider mismatch')
-    if data.get('abi') != 1: raise ProviderError('framebuffer ABI changed')
+
+def version() -> str:
+    if not VERSION_FILE.is_file():
+        raise ProviderError(f"VERSION is missing: {VERSION_FILE}")
+    value = VERSION_FILE.read_text(encoding="utf-8").strip()
+    if VERSION_RE.fullmatch(value) is None:
+        raise ProviderError(f"unsupported VERSION: {value!r}")
+    return value
+
+
+def _read_manifest() -> dict[str, object]:
+    try:
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProviderError(f"invalid provider.json: {error}") from error
+    if not isinstance(data, dict):
+        raise ProviderError("provider.json is not an object")
     return data
 
-def expected_files(data: dict):
-    yield data['kernel']['kernel_common']['patch'], data['kernel']['kernel_common']['sha256']
-    yield data['kernel']['gs201']['patch'], data['kernel']['gs201']['sha256']
-    yield data['userspace']['primitives']['path'], data['userspace']['primitives']['sha256']
-    yield data['userspace']['transport']['path'], data['userspace']['transport']['sha256']
+
+def _write_manifest(data: dict[str, object]) -> None:
+    MANIFEST.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def manifest() -> dict[str, object]:
+    data = _read_manifest()
+    expected_version = version()
+    if data.get("schema_version") != 1:
+        raise ProviderError("unsupported provider schema")
+    if data.get("provider") != PROVIDER_NAME:
+        raise ProviderError("provider identity changed")
+    if data.get("version") != expected_version:
+        raise ProviderError("VERSION/provider mismatch")
+    if data.get("abi") != PROVIDER_ABI:
+        raise ProviderError("framebuffer ABI changed")
+    return data
+
+
+def expected_files(data: dict[str, object]):
+    kernel = data.get("kernel")
+    userspace = data.get("userspace")
+    if not isinstance(kernel, dict) or not isinstance(userspace, dict):
+        raise ProviderError("provider payload contract is incomplete")
+    kernel_common = kernel.get("kernel_common")
+    gs201 = kernel.get("gs201")
+    primitives = userspace.get("primitives")
+    transport = userspace.get("transport")
+    for label, record in (
+        ("kernel_common", kernel_common),
+        ("gs201", gs201),
+        ("primitives", primitives),
+        ("transport", transport),
+    ):
+        if not isinstance(record, dict):
+            raise ProviderError(f"provider {label} contract is missing")
+        path = record.get("path") if label in {"primitives", "transport"} else record.get("patch")
+        digest = record.get("sha256")
+        if not isinstance(path, str) or not path:
+            raise ProviderError(f"provider {label} path is invalid")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ProviderError(f"provider {label} SHA256 is invalid")
+        yield path, digest
+
+
+def _sync_payload_hashes(data: dict[str, object]) -> None:
+    kernel = data["kernel"]
+    userspace = data["userspace"]
+    assert isinstance(kernel, dict)
+    assert isinstance(userspace, dict)
+    for record, field in (
+        (kernel["kernel_common"], "patch"),
+        (kernel["gs201"], "patch"),
+        (userspace["primitives"], "path"),
+        (userspace["transport"], "path"),
+    ):
+        assert isinstance(record, dict)
+        relative = record[field]
+        assert isinstance(relative, str)
+        payload = ROOT / relative
+        if not payload.is_file():
+            raise ProviderError(f"missing provider payload: {relative}")
+        record["sha256"] = sha256(payload)
+
+
+def _checksum_members(data: dict[str, object]) -> list[str]:
+    members = [
+        "VERSION",
+        "README.md",
+        "provider.json",
+        "framebufferctl",
+        "tests/test_provider.py",
+    ]
+    members.extend(relative for relative, _ in expected_files(data))
+    return sorted(set(members))
+
+
+def _write_sums(data: dict[str, object]) -> None:
+    lines = []
+    for relative in _checksum_members(data):
+        path = ROOT / relative
+        if not path.is_file():
+            raise ProviderError(f"checksum member is missing: {relative}")
+        lines.append(f"{sha256(path)}  {relative}\n")
+    SUMS.write_text("".join(lines), encoding="utf-8")
+
+
+def sync() -> None:
+    current_version = version()
+    data = _read_manifest()
+    data["version"] = current_version
+    userspace = data.get("userspace")
+    if not isinstance(userspace, dict):
+        raise ProviderError("provider userspace contract is missing")
+    contract = userspace.get("contract")
+    if not isinstance(contract, dict):
+        raise ProviderError("provider userspace contract is missing")
+    if contract.get("presentation") == "buffered-region-v1-candidate":
+        contract["presentation"] = "buffered-region-v1"
+    _sync_payload_hashes(data)
+    _write_manifest(data)
+
+    if not README.is_file():
+        raise ProviderError("README.md is missing")
+    lines = README.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ProviderError("README.md is empty")
+    lines[0] = f"# TreeForge Bootstrap Framebuffer — {current_version}"
+    README.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    _write_sums(data)
+    print(f"VERSION={current_version}")
+    print("TREEFORGE_BOOTSTRAP_FRAMEBUFFER_SYNC=PASS")
+
+
+def _verify_sums() -> None:
+    if not SUMS.is_file():
+        raise ProviderError("SHA256SUMS is missing")
+    seen: set[str] = set()
+    for raw in SUMS.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            digest, relative = raw.split("  ", 1)
+        except ValueError as error:
+            raise ProviderError(f"invalid SHA256SUMS line: {raw!r}") from error
+        if relative in seen:
+            raise ProviderError(f"duplicate SHA256SUMS path: {relative}")
+        seen.add(relative)
+        path = ROOT / relative
+        if not path.is_file():
+            raise ProviderError(f"SHA256SUMS path is missing: {relative}")
+        actual = sha256(path)
+        if actual != digest:
+            raise ProviderError(
+                f"SHA256SUMS mismatch: {relative}\nexpected={digest}\nactual={actual}"
+            )
+    expected = set(_checksum_members(manifest()))
+    if seen != expected:
+        raise ProviderError(
+            "SHA256SUMS membership changed: "
+            f"expected={sorted(expected)!r} actual={sorted(seen)!r}"
+        )
+
+
+def _verify_readme_version() -> None:
+    current_version = version()
+    text = README.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or lines[0] != f"# TreeForge Bootstrap Framebuffer — {current_version}":
+        raise ProviderError("README title does not match VERSION")
+    self_versions = VERSION_RE.findall(text)
+    if self_versions != [current_version]:
+        raise ProviderError(
+            "README must contain exactly one component version, in the title"
+        )
+
 
 def verify() -> None:
     data = manifest()
-    seen=set()
-    for rel, expected in expected_files(data):
-        if rel in seen: raise ProviderError(f'duplicate provider file: {rel}')
-        seen.add(rel)
-        p=ROOT/rel
-        if not p.is_file(): raise ProviderError(f'missing provider file: {rel}')
-        actual=sha256(p)
-        if actual != expected: raise ProviderError(f'SHA256 mismatch: {rel}\nexpected={expected}\nactual={actual}')
-    common=(ROOT/data['kernel']['kernel_common']['patch']).read_text()
-    gs=(ROOT/data['kernel']['gs201']['patch']).read_text()
-    primitives=(ROOT/data['userspace']['primitives']['path']).read_text()
-    transport=(ROOT/data['userspace']['transport']['path']).read_text()
-    required_common=['CONFIG_TREEFORGE_BOOTSTRAP_FB=y','drivers/misc/treeforge_bootstrap_fb.c','TF_FB_ABI_VERSION            1U','TF_FB_IOCTL_SEAL']
-    required_primitives=['TREEFORGE_BOOTSTRAP_FB_CONSUMER_V1','TFB_FB_ABI_VERSION 1U','TFB_FB_IOCTL_SEAL 0x5001UL','static void tfb_fb_fill_rect(','static void tfb_fb_draw_text(']
-    required_transport=['static int tfb_fb_parse_dev_number(','static int tfb_fb_begin(void)','static void tfb_fb_cleanup(void)','static void tfb_probe_display_surfaces(void)']
+    _verify_readme_version()
+    _verify_sums()
+
+    seen: set[str] = set()
+    for relative, expected in expected_files(data):
+        if relative in seen:
+            raise ProviderError(f"duplicate provider file: {relative}")
+        seen.add(relative)
+        path = ROOT / relative
+        if not path.is_file():
+            raise ProviderError(f"missing provider file: {relative}")
+        actual = sha256(path)
+        if actual != expected:
+            raise ProviderError(
+                f"SHA256 mismatch: {relative}\nexpected={expected}\nactual={actual}"
+            )
+
+    kernel = data["kernel"]
+    userspace = data["userspace"]
+    assert isinstance(kernel, dict)
+    assert isinstance(userspace, dict)
+    common_record = kernel["kernel_common"]
+    gs_record = kernel["gs201"]
+    primitives_record = userspace["primitives"]
+    transport_record = userspace["transport"]
+    assert isinstance(common_record, dict)
+    assert isinstance(gs_record, dict)
+    assert isinstance(primitives_record, dict)
+    assert isinstance(transport_record, dict)
+
+    common = (ROOT / str(common_record["patch"])).read_text(encoding="utf-8")
+    gs = (ROOT / str(gs_record["patch"])).read_text(encoding="utf-8")
+    primitives = (ROOT / str(primitives_record["path"])).read_text(encoding="utf-8")
+    transport = (ROOT / str(transport_record["path"])).read_text(encoding="utf-8")
+
+    required_common = [
+        "CONFIG_TREEFORGE_BOOTSTRAP_FB=y",
+        "drivers/misc/treeforge_bootstrap_fb.c",
+        "TF_FB_ABI_VERSION            1U",
+        "TF_FB_IOCTL_SEAL",
+    ]
+    required_primitives = [
+        "TREEFORGE_BOOTSTRAP_FB_CONSUMER_V1",
+        "TFB_FB_BUFFERED_PRESENT_V1",
+        "TFB_FB_ABI_VERSION 1U",
+        "TFB_FB_IOCTL_SEAL 0x5001UL",
+        "static int tfb_fb_buffer_begin_region(",
+        "static void tfb_fb_buffer_present_region(void)",
+        "static void tfb_fb_fill_rect(",
+        "static void tfb_fb_draw_text(",
+    ]
+    required_transport = [
+        "static int tfb_fb_parse_dev_number(",
+        "static int tfb_fb_begin(void)",
+        "/dev/treeforge-bootstrap-fb-buffer-ready",
+        "/dev/treeforge-bootstrap-fb-buffer-unavailable",
+        "static void tfb_fb_cleanup(void)",
+        "static void tfb_probe_display_surfaces(void)",
+    ]
     for marker in required_common:
-        if marker not in common: raise ProviderError(f'kernel contract marker missing: {marker}')
-    if 'CONFIG_TREEFORGE_BOOTSTRAP_FB=y' not in gs: raise ProviderError('GS201 enablement marker missing')
+        if marker not in common:
+            raise ProviderError(f"kernel contract marker missing: {marker}")
+    if "CONFIG_TREEFORGE_BOOTSTRAP_FB=y" not in gs:
+        raise ProviderError("GS201 enablement marker missing")
     for marker in required_primitives:
-        if marker not in primitives: raise ProviderError(f'userspace primitive marker missing: {marker}')
+        if marker not in primitives:
+            raise ProviderError(f"userspace primitive marker missing: {marker}")
     for marker in required_transport:
-        if marker not in transport: raise ProviderError(f'userspace transport marker missing: {marker}')
-    if 'SYS_IOCTL' in transport and 'TFB_FB_IOCTL_SEAL' in transport:
-        pass
-    print('PROVIDER=treeforge_bootstrap_framebuffer')
+        if marker not in transport:
+            raise ProviderError(f"userspace transport marker missing: {marker}")
+
+    contract = userspace.get("contract")
+    if not isinstance(contract, dict) or contract.get("presentation") != "buffered-region-v1":
+        raise ProviderError("buffered presentation contract is not accepted")
+
+    print(f"PROVIDER={PROVIDER_NAME}")
     print(f"VERSION={data['version']}")
     print(f"ABI={data['abi']}")
-    print('KERNEL_BRIDGE=PASS')
-    print('USERSPACE_CONSUMER=PASS')
-    print('TREEFORGE_BOOTSTRAP_FRAMEBUFFER_VERIFY=PASS')
+    print("VERSION_SOURCE=VERSION")
+    print("README_VERSION_AUDIT=PASS")
+    print("KERNEL_BRIDGE=PASS")
+    print("BUFFERED_PRESENT=PASS")
+    print("TREEFORGE_BOOTSTRAP_FRAMEBUFFER_VERIFY=PASS")
+
+
+def _archive_members(data: dict[str, object]) -> list[str]:
+    return sorted(set(_checksum_members(data) + ["SHA256SUMS"]))
+
 
 def package() -> Path:
     verify()
-    data=manifest(); version=data['version']; out=ROOT/'out'; out.mkdir(exist_ok=True)
-    name=f'treeforge-bootstrap-framebuffer-tangorpro-android15-{version}.tar.xz'
-    dest=out/name
-    members=['VERSION','README.md','provider.json','framebufferctl',data['kernel']['kernel_common']['patch'],data['kernel']['gs201']['patch'],data['userspace']['primitives']['path'],data['userspace']['transport']['path']]
-    epoch=int(os.environ.get('SOURCE_DATE_EPOCH','0'))
-    with lzma.open(dest,'wb',format=lzma.FORMAT_XZ,preset=9) as xz:
-        with tarfile.open(fileobj=xz,mode='w',format=tarfile.PAX_FORMAT) as tf:
-            for rel in members:
-                p=ROOT/rel; raw=p.read_bytes(); ti=tarfile.TarInfo(rel); ti.size=len(raw); ti.mtime=epoch; ti.uid=0; ti.gid=0; ti.uname=''; ti.gname=''; ti.mode=0o755 if rel=='framebufferctl' else 0o644
-                tf.addfile(ti,io.BytesIO(raw))
-    digest=sha256(dest); (out/(name+'.sha256')).write_text(f'{digest}  {name}\n')
-    print(f'ARCHIVE={dest}'); print(f'BYTES={dest.stat().st_size}'); print(f'SHA256={digest}'); print('TREEFORGE_BOOTSTRAP_FRAMEBUFFER_PACKAGE=PASS')
-    return dest
+    data = manifest()
+    current_version = version()
+    RELEASE_ROOT.mkdir(exist_ok=True)
+    name = f"treeforge-bootstrap-framebuffer-{current_version}-provider.tar.xz"
+    destination = RELEASE_ROOT / name
+    sidecar = RELEASE_ROOT / f"{name}.sha256"
+    prefix = PROVIDER_NAME
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
 
-def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('command',choices=('verify','package')); a=ap.parse_args()
+    with lzma.open(destination, "wb", format=lzma.FORMAT_XZ, preset=9) as xz:
+        with tarfile.open(fileobj=xz, mode="w", format=tarfile.PAX_FORMAT) as bundle:
+            for relative in _archive_members(data):
+                path = ROOT / relative
+                raw = path.read_bytes()
+                info = tarfile.TarInfo(f"{prefix}/{relative}")
+                info.size = len(raw)
+                info.mtime = epoch
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                info.mode = 0o755 if relative == "framebufferctl" else 0o644
+                bundle.addfile(info, io.BytesIO(raw))
+
+    digest = sha256(destination)
+    sidecar.write_text(f"{digest}  {name}\n", encoding="utf-8")
+    print(f"VERSION={current_version}")
+    print(f"ARCHIVE={destination}")
+    print(f"BYTES={destination.stat().st_size}")
+    print(f"SHA256={digest}")
+    print(f"PROVIDER_METADATA={MANIFEST}")
+    print(f"CHECKSUMS={SUMS}")
+    print("TREEFORGE_BOOTSTRAP_FRAMEBUFFER_PACKAGE=PASS")
+    return destination
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("sync", "verify", "package"))
+    args = parser.parse_args()
     try:
-        if a.command=='verify': verify()
-        else: package()
-    except ProviderError as e:
-        print(f'ERROR: {e}', file=__import__('sys').stderr); raise SystemExit(1)
-if __name__=='__main__': main()
+        if args.command == "sync":
+            sync()
+        elif args.command == "verify":
+            verify()
+        else:
+            package()
+    except ProviderError as error:
+        print(f"ERROR: {error}", file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

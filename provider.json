@@ -35,6 +35,7 @@
     "contract": {
       "device": "/dev/treeforge_bootstrap_fb",
       "info_bytes": 64,
+      "presentation": "buffered-region-v1",
       "required_flags": [
         "linear",
         "write_combine"
@@ -45,12 +46,12 @@
     "integration": "textual-c-fragment",
     "primitives": {
       "path": "userspace/consumer-primitives-v1.inc",
-      "sha256": "fa37265a0ad2d82ca97933e523c43626f813b6593a468af4f35fe72ef9ce3fc0"
+      "sha256": "1be5d937fdddb3f8f5ac8b11242d5e3c7dc997d0510dac88850e4675ba78a423"
     },
     "transport": {
       "path": "userspace/consumer-transport-v1.inc",
-      "sha256": "62a2c5d045bd27653aa92a33f061569a7a6f0591ee8c60aa1e69645548b74684"
+      "sha256": "9685fd14177bea342ee71480a98f9984bfbabf4eb73981228a4d77a5e27ec510"
     }
   },
-  "version": "v1.0b1"
+  "version": "v1.0b2"
 }

@@ -503,6 +503,39 @@ static int tfb_fb_begin(void) {
         info.stride
     );
 
+#ifndef MAP_PRIVATE
+#define MAP_PRIVATE 2
+#endif
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS 0x20
+#endif
+
+    long buffer_address = tfb_syscall6(
+        SYS_MMAP,
+        0,
+        (long) info.mmap_bytes,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0
+    );
+
+    if (buffer_address >= 0) {
+        tfb_fb_menu_buffer_address = buffer_address;
+        tfb_fb_menu_buffer_size = info.mmap_bytes;
+
+        tfb_create_presence_marker(
+            "/dev/treeforge-bootstrap-fb-buffer-ready"
+        );
+    } else {
+        tfb_fb_menu_buffer_address = -1;
+        tfb_fb_menu_buffer_size = 0;
+
+        tfb_create_presence_marker(
+            "/dev/treeforge-bootstrap-fb-buffer-unavailable"
+        );
+    }
+
     tfb_create_presence_marker(
         "/dev/treeforge-bootstrap-fb-info-ok"
     );
@@ -528,6 +561,20 @@ static void tfb_fb_cleanup(void) {
         return;
     }
 
+    tfb_fb_menu_buffer_region_active = 0;
+    tfb_fb_menu_buffer_initialized = 0;
+
+    if (
+        tfb_fb_menu_buffer_address >= 0
+        && tfb_fb_menu_buffer_size != 0
+    ) {
+        tfb_syscall2(
+            SYS_MUNMAP,
+            tfb_fb_menu_buffer_address,
+            (long) tfb_fb_menu_buffer_size
+        );
+    }
+
     if (
         tfb_fb_menu_mapped_address >= 0
         && tfb_fb_menu_mapped_size != 0
@@ -551,6 +598,14 @@ static void tfb_fb_cleanup(void) {
     tfb_fb_menu_active = 0;
     tfb_fb_menu_mapped_address = -1;
     tfb_fb_menu_mapped_size = 0;
+    tfb_fb_menu_buffer_address = -1;
+    tfb_fb_menu_buffer_size = 0;
+    tfb_fb_menu_buffer_region_active = 0;
+    tfb_fb_menu_buffer_initialized = 0;
+    tfb_fb_menu_buffer_x = 0;
+    tfb_fb_menu_buffer_y = 0;
+    tfb_fb_menu_buffer_width = 0;
+    tfb_fb_menu_buffer_height = 0;
 
     tfb_fb_menu_width = 0;
     tfb_fb_menu_height = 0;

@@ -12,6 +12,26 @@ static int tfb_fb_menu_active = 0;
 static long tfb_fb_menu_mapped_address = -1;
 static u64 tfb_fb_menu_mapped_size = 0;
 
+/*
+ * TFB_FB_BUFFERED_PRESENT_V1
+ *
+ * The kernel bridge exposes the already-scanning bootloader framebuffer.
+ * Rendering directly into that mapping exposes intermediate clear/border/text
+ * operations to scanout.  Keep the kernel ABI unchanged and stage selected
+ * redraw regions in anonymous userspace memory before copying the completed
+ * region into the live mapping.
+ */
+#define TFB_FB_BUFFERED_PRESENT_AVAILABLE 1
+
+static long tfb_fb_menu_buffer_address = -1;
+static u64 tfb_fb_menu_buffer_size = 0;
+static int tfb_fb_menu_buffer_region_active = 0;
+static int tfb_fb_menu_buffer_initialized = 0;
+static u32 tfb_fb_menu_buffer_x = 0;
+static u32 tfb_fb_menu_buffer_y = 0;
+static u32 tfb_fb_menu_buffer_width = 0;
+static u32 tfb_fb_menu_buffer_height = 0;
+
 static u32 tfb_fb_menu_width = 0;
 static u32 tfb_fb_menu_height = 0;
 static u32 tfb_fb_menu_pitch = 0;
@@ -95,6 +115,151 @@ static int tfb_fb_active = 0;
 static int tfb_fb_created_node = 0;
 
 
+static void tfb_fb_copy_region(
+    long destination_address,
+    long source_address,
+    u32 x,
+    u32 y,
+    u32 width,
+    u32 height
+) {
+    if (
+        destination_address < 0
+        || source_address < 0
+        || width == 0
+        || height == 0
+        || x >= tfb_fb_menu_width
+        || y >= tfb_fb_menu_height
+    ) {
+        return;
+    }
+
+    if (width > tfb_fb_menu_width - x) {
+        width = tfb_fb_menu_width - x;
+    }
+
+    if (height > tfb_fb_menu_height - y) {
+        height = tfb_fb_menu_height - y;
+    }
+
+    volatile unsigned char *destination = (
+        (volatile unsigned char *)
+        (usize) destination_address
+    );
+
+    volatile unsigned char *source = (
+        (volatile unsigned char *)
+        (usize) source_address
+    );
+
+    for (u32 row_index = 0; row_index < height; row_index++) {
+        volatile u32 *destination_row = (
+            (volatile u32 *)
+            (destination
+             + ((usize) (y + row_index) * (usize) tfb_fb_menu_pitch))
+        );
+
+        volatile u32 *source_row = (
+            (volatile u32 *)
+            (source
+             + ((usize) (y + row_index) * (usize) tfb_fb_menu_pitch))
+        );
+
+        for (u32 column = 0; column < width; column++) {
+            destination_row[x + column] = source_row[x + column];
+        }
+    }
+}
+
+
+static int tfb_fb_buffer_begin_region(
+    u32 x,
+    u32 y,
+    u32 width,
+    u32 height
+) {
+    if (
+        !tfb_fb_menu_active
+        || tfb_fb_menu_mapped_address < 0
+        || tfb_fb_menu_buffer_address < 0
+        || tfb_fb_menu_buffer_size == 0
+        || tfb_fb_menu_buffer_region_active
+        || width == 0
+        || height == 0
+        || x >= tfb_fb_menu_width
+        || y >= tfb_fb_menu_height
+    ) {
+        return 0;
+    }
+
+    if (width > tfb_fb_menu_width - x) {
+        width = tfb_fb_menu_width - x;
+    }
+
+    if (height > tfb_fb_menu_height - y) {
+        height = tfb_fb_menu_height - y;
+    }
+
+    /*
+     * The initial full menu render initializes the complete shadow.
+     * After that, dirty-region rendering mutates the retained shadow
+     * directly, so no readback from the write-combined live mapping is
+     * needed.  If a dirty render somehow arrives before initialization,
+     * fall back to direct rendering rather than publishing undefined RAM.
+     */
+    if (
+        !tfb_fb_menu_buffer_initialized
+        && (
+            x != 0
+            || y != 0
+            || width != tfb_fb_menu_width
+            || height != tfb_fb_menu_height
+        )
+    ) {
+        return 0;
+    }
+
+    tfb_fb_menu_buffer_x = x;
+    tfb_fb_menu_buffer_y = y;
+    tfb_fb_menu_buffer_width = width;
+    tfb_fb_menu_buffer_height = height;
+    tfb_fb_menu_buffer_region_active = 1;
+
+    return 1;
+}
+
+
+static void tfb_fb_buffer_present_region(void) {
+    if (!tfb_fb_menu_buffer_region_active) {
+        return;
+    }
+
+    tfb_fb_copy_region(
+        tfb_fb_menu_mapped_address,
+        tfb_fb_menu_buffer_address,
+        tfb_fb_menu_buffer_x,
+        tfb_fb_menu_buffer_y,
+        tfb_fb_menu_buffer_width,
+        tfb_fb_menu_buffer_height
+    );
+
+    if (
+        tfb_fb_menu_buffer_x == 0
+        && tfb_fb_menu_buffer_y == 0
+        && tfb_fb_menu_buffer_width == tfb_fb_menu_width
+        && tfb_fb_menu_buffer_height == tfb_fb_menu_height
+    ) {
+        tfb_fb_menu_buffer_initialized = 1;
+    }
+
+    tfb_fb_menu_buffer_region_active = 0;
+    tfb_fb_menu_buffer_x = 0;
+    tfb_fb_menu_buffer_y = 0;
+    tfb_fb_menu_buffer_width = 0;
+    tfb_fb_menu_buffer_height = 0;
+}
+
+
 static void tfb_fb_fill_rect(
     u32 x,
     u32 y,
@@ -129,9 +294,27 @@ static void tfb_fb_fill_rect(
         );
     }
 
+    if (
+        !tfb_fb_menu_buffer_region_active
+        && tfb_fb_menu_buffer_initialized
+    ) {
+        /*
+         * A direct draw means some caller intentionally bypassed the
+         * buffered menu transaction.  Invalidate the shadow so a later
+         * partial menu update cannot publish stale pixels.
+         */
+        tfb_fb_menu_buffer_initialized = 0;
+    }
+
+    long draw_address = (
+        tfb_fb_menu_buffer_region_active
+            ? tfb_fb_menu_buffer_address
+            : tfb_fb_menu_mapped_address
+    );
+
     volatile unsigned char *base = (
         (volatile unsigned char *)
-        (usize) tfb_fb_menu_mapped_address
+        (usize) draw_address
     );
 
     for (
