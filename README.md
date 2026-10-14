@@ -2,24 +2,20 @@
 
 Framebuffer provider for TreeForge Bootstrap on Pixel Tablet (`tangorpro`).
 
-## Owns
+## Build
 
-- GS201 early framebuffer bridge patches
-- framebuffer ABI 1
-- Bootstrap framebuffer consumer and presentation fragments
+    ./framebufferctl build
 
-The renderer uses a private RAM surface and presents completed dirty regions to the live scanout framebuffer.
+A successful build verifies the provider and promotes it to `out/development-provider/current`. The newest five successful runs are retained.
 
 ## Verify
 
-```bash
-./framebufferctl verify
-```
+    ./framebufferctl verify
 
 ## Package
 
-```bash
-./framebufferctl package
-```
+    ./framebufferctl package
 
-`VERSION` is the authoritative component version. Provider metadata, release names, and checksums are generated from it.
+Package archives the exact current development provider into `.release/`. It does not rebuild it.
+
+`VERSION` is authoritative.

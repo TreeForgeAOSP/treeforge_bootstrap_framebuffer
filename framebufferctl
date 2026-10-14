@@ -9,7 +9,10 @@ import lzma
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import tarfile
+from datetime import datetime
 
 
 ROOT = Path(__file__).resolve().parent
@@ -18,6 +21,12 @@ README = ROOT / "README.md"
 MANIFEST = ROOT / "provider.json"
 SUMS = ROOT / "SHA256SUMS"
 RELEASE_ROOT = ROOT / ".release"
+DEVELOPMENT_ROOT = ROOT / "out" / "development-provider"
+DEVELOPMENT_RUNS = DEVELOPMENT_ROOT / "runs"
+DEVELOPMENT_INCOMING = DEVELOPMENT_ROOT / ".incoming"
+DEVELOPMENT_CURRENT = DEVELOPMENT_ROOT / "current"
+DEVELOPMENT_RETENTION = 5
+DEVELOPMENT_SCHEMA = "treeforge.development-provider.v1"
 PROVIDER_NAME = "treeforge_bootstrap_framebuffer"
 PROVIDER_ABI = 1
 VERSION_RE = re.compile(r"v1\.0b[0-9]+")
@@ -305,57 +314,615 @@ def _archive_members(data: dict[str, object]) -> list[str]:
     return sorted(set(_checksum_members(data) + ["SHA256SUMS"]))
 
 
-def package() -> Path:
-    verify()
-    data = manifest()
-    current_version = version()
-    RELEASE_ROOT.mkdir(exist_ok=True)
-    name = f"treeforge-bootstrap-framebuffer-{current_version}-provider.tar.xz"
-    destination = RELEASE_ROOT / name
-    sidecar = RELEASE_ROOT / f"{name}.sha256"
-    prefix = PROVIDER_NAME
-    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
 
-    with lzma.open(destination, "wb", format=lzma.FORMAT_XZ, preset=9) as xz:
-        with tarfile.open(fileobj=xz, mode="w", format=tarfile.PAX_FORMAT) as bundle:
-            for relative in _archive_members(data):
-                path = ROOT / relative
+def _run_id() -> str:
+    return datetime.now().astimezone().strftime(
+        "%Y%m%d-%H%M%S-%f%z"
+    )
+
+
+def _git_source() -> tuple[str, bool, str | None]:
+    commit_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    if commit_result.returncode != 0:
+        raise ProviderError(
+            "unable to resolve source commit"
+        )
+
+    status_result = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    if status_result.returncode != 0:
+        raise ProviderError(
+            "unable to resolve source worktree state"
+        )
+
+    remote_result = subprocess.run(
+        [
+            "git",
+            "config",
+            "--get",
+            "remote.origin.url",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    remote = (
+        remote_result.stdout.strip()
+        if remote_result.returncode == 0
+        and remote_result.stdout.strip()
+        else None
+    )
+
+    return (
+        commit_result.stdout.strip(),
+        bool(status_result.stdout.strip()),
+        remote,
+    )
+
+
+def _verify_development_provider(
+    root: Path,
+) -> dict[str, object]:
+    manifest_path = (
+        root
+        / "development-provider.json"
+    )
+
+    if not manifest_path.is_file():
+        raise ProviderError(
+            "development-provider.json is missing"
+        )
+
+    try:
+        development = json.loads(
+            manifest_path.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as error:
+        raise ProviderError(
+            "invalid development-provider.json"
+        ) from error
+
+    if not isinstance(
+        development,
+        dict,
+    ):
+        raise ProviderError(
+            "development-provider.json is not an object"
+        )
+
+    if (
+        development.get("schema")
+        != DEVELOPMENT_SCHEMA
+        or development.get("provider")
+        != PROVIDER_NAME
+        or development.get("channel")
+        != "development"
+        or development.get("release_eligible")
+        is not False
+    ):
+        raise ProviderError(
+            "development provider identity changed"
+        )
+
+    provider_path = root / "provider.json"
+
+    try:
+        data = json.loads(
+            provider_path.read_text(
+                encoding="utf-8"
+            )
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ) as error:
+        raise ProviderError(
+            "development provider.json is invalid"
+        ) from error
+
+    if not isinstance(data, dict):
+        raise ProviderError(
+            "development provider.json is not an object"
+        )
+
+    if (
+        data.get("provider")
+        != PROVIDER_NAME
+        or data.get("schema_version")
+        != 1
+        or data.get("abi")
+        != PROVIDER_ABI
+        or data.get("version")
+        != development.get("version")
+    ):
+        raise ProviderError(
+            "development provider contract changed"
+        )
+
+    sums_path = root / "SHA256SUMS"
+
+    if not sums_path.is_file():
+        raise ProviderError(
+            "development SHA256SUMS is missing"
+        )
+
+    seen: set[str] = set()
+
+    for raw in sums_path.read_text(
+        encoding="utf-8"
+    ).splitlines():
+        if not raw.strip():
+            continue
+
+        try:
+            digest, relative = raw.split(
+                "  ",
+                1,
+            )
+        except ValueError as error:
+            raise ProviderError(
+                "invalid development "
+                f"SHA256SUMS line: {raw!r}"
+            ) from error
+
+        if relative in seen:
+            raise ProviderError(
+                "duplicate development checksum: "
+                f"{relative}"
+            )
+
+        seen.add(relative)
+
+        path = root / relative
+
+        if not path.is_file():
+            raise ProviderError(
+                "development provider file missing: "
+                f"{relative}"
+            )
+
+        actual = sha256(path)
+
+        if actual != digest:
+            raise ProviderError(
+                "development checksum mismatch: "
+                f"{relative}"
+            )
+
+    expected = set(
+        _checksum_members(data)
+    )
+
+    if seen != expected:
+        raise ProviderError(
+            "development checksum membership changed"
+        )
+
+    for relative, expected_digest in expected_files(
+        data
+    ):
+        path = root / relative
+
+        if not path.is_file():
+            raise ProviderError(
+                "development payload missing: "
+                f"{relative}"
+            )
+
+        if sha256(path) != expected_digest:
+            raise ProviderError(
+                "development payload checksum mismatch: "
+                f"{relative}"
+            )
+
+    return development
+
+
+def _update_current(
+    run: Path,
+) -> None:
+    temporary = (
+        DEVELOPMENT_ROOT
+        / ".current.tmp"
+    )
+
+    if (
+        temporary.exists()
+        or temporary.is_symlink()
+    ):
+        temporary.unlink()
+
+    temporary.symlink_to(
+        Path("runs")
+        / run.name,
+        target_is_directory=True,
+    )
+
+    os.replace(
+        temporary,
+        DEVELOPMENT_CURRENT,
+    )
+
+
+def _prune_development_runs(
+    current_run: Path,
+) -> None:
+    runs = sorted(
+        (
+            path
+            for path in DEVELOPMENT_RUNS.iterdir()
+            if path.is_dir()
+        ),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+
+    keep = [current_run]
+
+    for path in runs:
+        if path == current_run:
+            continue
+
+        if len(keep) >= DEVELOPMENT_RETENTION:
+            break
+
+        keep.append(path)
+
+    keep_resolved = {
+        path.resolve()
+        for path in keep
+    }
+
+    for path in runs:
+        if path.resolve() in keep_resolved:
+            continue
+
+        shutil.rmtree(path)
+
+
+def build() -> Path:
+    sync()
+    verify()
+
+    data = manifest()
+
+    DEVELOPMENT_ROOT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    DEVELOPMENT_RUNS.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    DEVELOPMENT_INCOMING.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    run_id = _run_id()
+
+    staged = (
+        DEVELOPMENT_INCOMING
+        / run_id
+    )
+
+    final = (
+        DEVELOPMENT_RUNS
+        / run_id
+    )
+
+    if staged.exists() or final.exists():
+        raise ProviderError(
+            f"development run already exists: {run_id}"
+        )
+
+    staged.mkdir(
+        parents=True,
+    )
+
+    try:
+        for relative in _archive_members(data):
+            source = ROOT / relative
+            destination = staged / relative
+
+            destination.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            shutil.copy2(
+                source,
+                destination,
+            )
+
+        source_commit, source_dirty, repository = (
+            _git_source()
+        )
+
+        development = {
+            "schema":
+                DEVELOPMENT_SCHEMA,
+
+            "provider":
+                PROVIDER_NAME,
+
+            "channel":
+                "development",
+
+            "release_eligible":
+                False,
+
+            "version":
+                data["version"],
+
+            "abi":
+                PROVIDER_ABI,
+
+            "run_id":
+                run_id,
+
+            "source_commit":
+                source_commit,
+
+            "source_dirty":
+                source_dirty,
+
+            "repository":
+                repository,
+
+            "retention_successful_runs":
+                DEVELOPMENT_RETENTION,
+        }
+
+        if "component_versions" in data:
+            development["component_versions"] = (
+                data["component_versions"]
+            )
+
+        (
+            staged
+            / "development-provider.json"
+        ).write_text(
+            json.dumps(
+                development,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        _verify_development_provider(
+            staged
+        )
+
+        staged.replace(
+            final
+        )
+
+    except Exception:
+        if staged.exists():
+            shutil.rmtree(
+                staged
+            )
+
+        raise
+
+    _update_current(
+        final
+    )
+
+    _prune_development_runs(
+        final
+    )
+
+    print(
+        f"RUN={final}"
+    )
+    print(
+        f"CURRENT={DEVELOPMENT_CURRENT}"
+    )
+    print(
+        f"RETAINED={DEVELOPMENT_RETENTION}"
+    )
+    print(
+        f"{PROVIDER_NAME.upper()}_DEVELOPMENT_PROVIDER=PASS"
+    )
+
+    return final
+
+
+def package() -> Path:
+    if not DEVELOPMENT_CURRENT.exists():
+        raise ProviderError(
+            "development provider is missing; "
+            "run ./framebufferctl build first"
+        )
+
+    provider_root = DEVELOPMENT_CURRENT.resolve(
+        strict=True
+    )
+
+    _verify_development_provider(
+        provider_root
+    )
+
+    data = json.loads(
+        (
+            provider_root
+            / "provider.json"
+        ).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    current_version = str(
+        data["version"]
+    )
+
+    RELEASE_ROOT.mkdir(
+        exist_ok=True
+    )
+
+    name = (
+        "treeforge-bootstrap-framebuffer-"
+        f"{current_version}-provider.tar.xz"
+    )
+
+    destination = (
+        RELEASE_ROOT
+        / name
+    )
+
+    sidecar = (
+        RELEASE_ROOT
+        / f"{name}.sha256"
+    )
+
+    prefix = PROVIDER_NAME
+
+    epoch = int(
+        os.environ.get(
+            "SOURCE_DATE_EPOCH",
+            "0",
+        )
+    )
+
+    with lzma.open(
+        destination,
+        "wb",
+        format=lzma.FORMAT_XZ,
+        preset=9,
+    ) as xz:
+        with tarfile.open(
+            fileobj=xz,
+            mode="w",
+            format=tarfile.PAX_FORMAT,
+        ) as bundle:
+            for relative in _archive_members(
+                data
+            ):
+                path = (
+                    provider_root
+                    / relative
+                )
+
                 raw = path.read_bytes()
-                info = tarfile.TarInfo(f"{prefix}/{relative}")
+
+                info = tarfile.TarInfo(
+                    f"{prefix}/{relative}"
+                )
+
                 info.size = len(raw)
                 info.mtime = epoch
                 info.uid = 0
                 info.gid = 0
                 info.uname = ""
                 info.gname = ""
-                info.mode = 0o755 if relative == "framebufferctl" else 0o644
-                bundle.addfile(info, io.BytesIO(raw))
 
-    digest = sha256(destination)
-    sidecar.write_text(f"{digest}  {name}\n", encoding="utf-8")
-    print(f"VERSION={current_version}")
-    print(f"ARCHIVE={destination}")
-    print(f"BYTES={destination.stat().st_size}")
-    print(f"SHA256={digest}")
-    print(f"PROVIDER_METADATA={MANIFEST}")
-    print(f"CHECKSUMS={SUMS}")
-    print("TREEFORGE_BOOTSTRAP_FRAMEBUFFER_PACKAGE=PASS")
+                info.mode = (
+                    0o755
+                    if relative
+                    == "framebufferctl"
+                    else 0o644
+                )
+
+                bundle.addfile(
+                    info,
+                    io.BytesIO(raw),
+                )
+
+    digest = sha256(
+        destination
+    )
+
+    sidecar.write_text(
+        f"{digest}  {name}\n",
+        encoding="utf-8",
+    )
+
+    print(
+        f"VERSION={current_version}"
+    )
+    print(
+        f"DEVELOPMENT_RUN={provider_root}"
+    )
+    print(
+        f"ARCHIVE={destination}"
+    )
+    print(
+        f"BYTES={destination.stat().st_size}"
+    )
+    print(
+        f"SHA256={digest}"
+    )
+    print(
+        "TREEFORGE_BOOTSTRAP_"
+        "FRAMEBUFFER_PACKAGE=PASS"
+    )
+
     return destination
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("sync", "verify", "package"))
+    parser = argparse.ArgumentParser(
+        prog="framebufferctl"
+    )
+
+    parser.add_argument(
+        "command",
+        choices=(
+            "sync",
+            "verify",
+            "build",
+            "package",
+        ),
+    )
+
     args = parser.parse_args()
+
     try:
         if args.command == "sync":
             sync()
         elif args.command == "verify":
             verify()
+        elif args.command == "build":
+            build()
         else:
             package()
+
     except ProviderError as error:
-        print(f"ERROR: {error}", file=__import__("sys").stderr)
+        print(
+            f"ERROR: {error}",
+            file=__import__("sys").stderr,
+        )
         raise SystemExit(1)
 
 
