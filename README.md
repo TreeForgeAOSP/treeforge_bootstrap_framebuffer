@@ -6,16 +6,16 @@ Framebuffer provider for TreeForge Bootstrap on Pixel Tablet (`tangorpro`).
 
     ./framebufferctl build
 
-A successful build verifies the provider and promotes it to `out/development-provider/current`. The newest five successful runs are retained.
+Successful builds publish `out/development-provider/current` and retain the newest five successful runs.
 
 ## Verify
 
     ./framebufferctl verify
 
-## Package
+## Release
 
-    ./framebufferctl package
+    ./release prepare
 
-Package archives the exact current development provider into `.release/`. It does not rebuild it.
+Release packages the exact current development provider into `out/releases/<version>/assets`. It does not rebuild it.
 
 `VERSION` is authoritative.

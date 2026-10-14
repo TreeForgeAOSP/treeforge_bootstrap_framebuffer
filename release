@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURRENT="$ROOT/out/development-provider/current"
+PROVIDER="treeforge_bootstrap_framebuffer"
+CTL="$ROOT/framebufferctl"
+
+MODE="${1:-prepare}"
+FORCE=0
+
+case "$MODE" in
+    prepare)
+        shift || true
+        ;;
+    *)
+        echo "Usage: ./release prepare [--force]" >&2
+        exit 2
+        ;;
+esac
+
+if [ "${1:-}" = "--force" ]; then
+    FORCE=1
+    shift
+fi
+
+if [ "$#" -ne 0 ]; then
+    echo "Usage: ./release prepare [--force]" >&2
+    exit 2
+fi
+
+VERSION="$(
+python3 - "$CURRENT" "$PROVIDER" "$ROOT" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+current = Path(sys.argv[1])
+provider = sys.argv[2]
+repo = Path(sys.argv[3])
+
+if not current.exists():
+    raise SystemExit(
+        "ERROR: development provider current is missing"
+    )
+
+run = current.resolve(strict=True)
+
+runs = (
+    repo
+    / "out"
+    / "development-provider"
+    / "runs"
+).resolve()
+
+if run.parent != runs:
+    raise SystemExit(
+        "ERROR: current does not resolve to a retained run"
+    )
+
+development = json.loads(
+    (
+        run
+        / "development-provider.json"
+    ).read_text(
+        encoding="utf-8"
+    )
+)
+
+metadata = json.loads(
+    (
+        run
+        / "provider.json"
+    ).read_text(
+        encoding="utf-8"
+    )
+)
+
+if (
+    development.get("schema")
+    != "treeforge.development-provider.v1"
+    or development.get("provider")
+    != provider
+    or development.get("channel")
+    != "development"
+    or development.get("release_eligible")
+    is not False
+):
+    raise SystemExit(
+        "ERROR: development provider identity changed"
+    )
+
+if development.get("source_dirty") is not False:
+    raise SystemExit(
+        "ERROR: development provider was built from a dirty worktree"
+    )
+
+head = subprocess.run(
+    [
+        "git",
+        "rev-parse",
+        "HEAD",
+    ],
+    cwd=repo,
+    text=True,
+    capture_output=True,
+    check=True,
+).stdout.strip()
+
+if development.get("source_commit") != head:
+    raise SystemExit(
+        "ERROR: current development provider is not from HEAD"
+    )
+
+version = development.get("version")
+
+if (
+    not isinstance(version, str)
+    or not version
+    or metadata.get("version") != version
+):
+    raise SystemExit(
+        "ERROR: release version identity mismatch"
+    )
+
+print(version)
+PY
+)"
+
+VERSION_DIR="$ROOT/out/releases/$VERSION"
+ASSETS="$VERSION_DIR/assets"
+
+if [ -e "$VERSION_DIR" ]; then
+    if [ "$FORCE" -eq 1 ]; then
+        rm -rf "$VERSION_DIR"
+    else
+        echo \
+            "ERROR: release output already exists: $VERSION_DIR" \
+            >&2
+        echo \
+            "Use ./release prepare --force to replace local staged output." \
+            >&2
+        exit 2
+    fi
+fi
+
+(
+    cd "$CURRENT"
+    sha256sum -c SHA256SUMS
+)
+
+"$CTL" package
+
+ARCHIVE="$ASSETS/treeforge-bootstrap-framebuffer-$VERSION-provider.tar.xz"
+SIDECAR="$ARCHIVE.sha256"
+
+test -f "$ASSETS/provider.json"
+test -f "$ASSETS/SHA256SUMS"
+test -f "$ARCHIVE"
+test -f "$SIDECAR"
+
+(
+    cd "$ASSETS"
+    sha256sum -c "$(basename "$SIDECAR")"
+)
+
+echo "VERSION=$VERSION"
+echo "DEVELOPMENT_RUN=$(readlink -f "$CURRENT")"
+echo "RELEASE_ASSETS=$ASSETS"
+echo "REBUILD_PERFORMED=NO"
+echo "TREEFORGE_BOOTSTRAP_FRAMEBUFFER_RELEASE_PREPARE=PASS"

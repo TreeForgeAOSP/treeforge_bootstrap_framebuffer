@@ -20,7 +20,7 @@ VERSION_FILE = ROOT / "VERSION"
 README = ROOT / "README.md"
 MANIFEST = ROOT / "provider.json"
 SUMS = ROOT / "SHA256SUMS"
-RELEASE_ROOT = ROOT / ".release"
+RELEASE_ROOT = ROOT / "out" / "releases"
 DEVELOPMENT_ROOT = ROOT / "out" / "development-provider"
 DEVELOPMENT_RUNS = DEVELOPMENT_ROOT / "runs"
 DEVELOPMENT_INCOMING = DEVELOPMENT_ROOT / ".incoming"
@@ -766,13 +766,25 @@ def package() -> Path:
             "run ./framebufferctl build first"
         )
 
-    provider_root = DEVELOPMENT_CURRENT.resolve(
-        strict=True
+    provider_root = (
+        DEVELOPMENT_CURRENT
+        .resolve(
+            strict=True
+        )
     )
 
-    _verify_development_provider(
-        provider_root
+    development = (
+        _verify_development_provider(
+            provider_root
+        )
     )
+
+    if development.get(
+        "source_dirty"
+    ) is not False:
+        raise ProviderError(
+            "development provider source is dirty"
+        )
 
     data = json.loads(
         (
@@ -787,8 +799,34 @@ def package() -> Path:
         data["version"]
     )
 
-    RELEASE_ROOT.mkdir(
-        exist_ok=True
+    if (
+        development.get("version")
+        != current_version
+    ):
+        raise ProviderError(
+            "development/provider version mismatch"
+        )
+
+    release_dir = (
+        RELEASE_ROOT
+        / current_version
+        / "assets"
+    )
+
+    if (
+        release_dir.exists()
+        and any(
+            release_dir.iterdir()
+        )
+    ):
+        raise ProviderError(
+            "release assets already exist; "
+            "use ./release prepare --force"
+        )
+
+    release_dir.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
     name = (
@@ -797,12 +835,12 @@ def package() -> Path:
     )
 
     destination = (
-        RELEASE_ROOT
+        release_dir
         / name
     )
 
     sidecar = (
-        RELEASE_ROOT
+        release_dir
         / f"{name}.sha256"
     )
 
@@ -868,24 +906,46 @@ def package() -> Path:
         encoding="utf-8",
     )
 
+    shutil.copy2(
+        provider_root
+        / "provider.json",
+        release_dir
+        / "provider.json",
+    )
+
+    shutil.copy2(
+        provider_root
+        / "SHA256SUMS",
+        release_dir
+        / "SHA256SUMS",
+    )
+
     print(
         f"VERSION={current_version}"
     )
+
     print(
         f"DEVELOPMENT_RUN={provider_root}"
     )
+
+    print(
+        f"RELEASE_DIR={release_dir}"
+    )
+
     print(
         f"ARCHIVE={destination}"
     )
+
     print(
         f"BYTES={destination.stat().st_size}"
     )
+
     print(
         f"SHA256={digest}"
     )
+
     print(
-        "TREEFORGE_BOOTSTRAP_"
-        "FRAMEBUFFER_PACKAGE=PASS"
+        "TREEFORGE_BOOTSTRAP_FRAMEBUFFER_PACKAGE=PASS"
     )
 
     return destination
