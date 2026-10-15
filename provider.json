@@ -46,11 +46,11 @@
     "integration": "textual-c-fragment",
     "primitives": {
       "path": "userspace/consumer-primitives-v1.inc",
-      "sha256": "1be5d937fdddb3f8f5ac8b11242d5e3c7dc997d0510dac88850e4675ba78a423"
+      "sha256": "307679891270516da56ceb77bd9a3a755cdb42bc1f76343e5372ce41968908ff"
     },
     "transport": {
       "path": "userspace/consumer-transport-v1.inc",
-      "sha256": "9685fd14177bea342ee71480a98f9984bfbabf4eb73981228a4d77a5e27ec510"
+      "sha256": "bbea08f28782a0eeaf4b703315d7cca24cd7996e8b3425d5b01caa5712beea89"
     }
   },
   "version": "v1.0b1"

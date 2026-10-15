@@ -1,0 +1,15 @@
+TreeForge Bootstrap Framebuffer licensing
+=========================================
+
+TreeForge-owned userspace, host tooling, tests, documentation, and
+provider metadata in this repository are licensed under Apache-2.0.
+
+Linux kernel patch material under kernel/ is licensed under
+GPL-2.0-only.
+
+The corresponding license texts are provided in:
+
+    LICENSES/Apache-2.0.txt
+    LICENSES/GPL-2.0-only.txt
+
+Individual source files may carry SPDX identifiers where appropriate.
