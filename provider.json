@@ -3,8 +3,8 @@
   "baseline": {
     "bootstrap_commit": "2b5bee88529c0813cec600cd185f84e7944a6b21",
     "bootstrap_version": "v1.0b7",
-    "kernel_commit": "374d5b188f183846a81b98ec7c5a10da69625ea6",
-    "kernel_version": "r0.94-v1.0b2"
+    "kernel_commit": "06571a3a371e63227a6e05bcdeab1441d41586c0",
+    "kernel_version": "r0.94-v1.0b1"
   },
   "device": "tangorpro",
   "kernel": {
@@ -21,7 +21,7 @@
   },
   "ownership": {
     "kernel_consumer": "treeforge_kernel",
-    "repository": "TreeForgeDEV/treeforge_bootstrap_framebuffer",
+    "repository": "TreeForgeAOSP/treeforge_bootstrap_framebuffer",
     "userspace_consumer": "treeforge_bootstrap"
   },
   "platform": {
@@ -53,5 +53,5 @@
       "sha256": "9685fd14177bea342ee71480a98f9984bfbabf4eb73981228a4d77a5e27ec510"
     }
   },
-  "version": "v1.0b2"
+  "version": "v1.0b1"
 }

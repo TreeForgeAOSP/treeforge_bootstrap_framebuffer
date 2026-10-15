@@ -26,7 +26,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(data["abi"], 1)
         self.assertEqual(
             data["ownership"]["repository"],
-            "TreeForgeDEV/treeforge_bootstrap_framebuffer",
+            "TreeForgeAOSP/treeforge_bootstrap_framebuffer",
         )
 
     def test_readme_single_version(self):
