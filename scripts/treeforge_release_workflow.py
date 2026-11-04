@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -221,6 +222,64 @@ def read_provider_identity() -> dict:
     return doc
 
 
+
+
+def verify_framebuffer_assets(assets: Path, tag: str) -> None:
+    """Verify the provider archive, not imaginary loose files in assets/."""
+    archive_name = f'treeforge-bootstrap-framebuffer-{tag}-provider.tar.xz'
+    archive = assets / archive_name
+    sidecar = assets / f'{archive_name}.sha256'
+    sums = assets / 'SHA256SUMS'
+    provider = assets / 'provider.json'
+    require(all(p.is_file() for p in (archive, sidecar, sums, provider)),
+            'framebuffer staged asset missing')
+    require({p.name for p in assets.iterdir()} ==
+            {archive.name, sidecar.name, sums.name, provider.name},
+            'framebuffer staged asset membership changed')
+    sidecar_match = re.fullmatch(
+        r'([a-f0-9]{64})  (.+)\n?', sidecar.read_text())
+    require(sidecar_match is not None and sidecar_match.group(2) == archive_name,
+            'framebuffer archive sidecar malformed')
+    require(sha(archive) == sidecar_match.group(1),
+            'framebuffer archive sidecar checksum mismatch')
+
+    expected = {}
+    for line in sums.read_text().splitlines():
+        match = re.fullmatch(r'([a-f0-9]{64})  (.+)', line)
+        require(match is not None, 'framebuffer provider SHA256SUMS malformed')
+        name = match.group(2)
+        path = Path(name)
+        require(name not in expected and not path.is_absolute()
+                and '..' not in path.parts and name not in ('', '.'),
+                'framebuffer provider SHA256SUMS path invalid or duplicated')
+        expected[name] = match.group(1)
+    require(expected, 'framebuffer provider SHA256SUMS empty')
+    prefix = 'treeforge_bootstrap_framebuffer/'
+    observed = set()
+    with tarfile.open(archive, mode='r:xz') as bundle:
+        for member in bundle:
+            require(member.isfile() and member.name.startswith(prefix),
+                    'framebuffer archive member is not a regular provider file')
+            relative = member.name[len(prefix):]
+            require(relative not in observed and
+                    relative in (set(expected) | {'SHA256SUMS'}),
+                    'framebuffer archive member unexpected or duplicated')
+            observed.add(relative)
+            stream = bundle.extractfile(member)
+            require(stream is not None, 'framebuffer archive member unreadable')
+            digest = hashlib.sha256()
+            with stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            required_hash = (sha(sums) if relative == 'SHA256SUMS'
+                             else expected[relative])
+            require(digest.hexdigest() == required_hash,
+                    f'framebuffer archive member checksum mismatch: {relative}')
+            if relative == 'provider.json':
+                require(digest.hexdigest() == sha(provider),
+                        'framebuffer loose provider.json differs from archive')
+    require(observed == set(expected) | {'SHA256SUMS'},
+            'framebuffer archive member set incomplete')
 def staged_assets(tag: str) -> list[Path]:
     assets = ROOT / 'out' / 'releases' / tag / 'assets'
     require(assets.is_dir(), f'no prepared release assets: {assets}; run ./release prepare')
@@ -228,15 +287,18 @@ def staged_assets(tag: str) -> list[Path]:
     require(bool(files), 'empty prepared release')
     sums = assets / 'SHA256SUMS'
     require(sums.is_file(), f'{REPO}: staged SHA256SUMS missing')
-    for line in sums.read_text().splitlines():
-        if not line.strip():
-            continue
-        match = re.fullmatch(r'([a-f0-9]{64})\s+\*?(.+)', line)
-        require(match is not None, 'malformed SHA256SUMS line')
-        rel = Path(match.group(2))
-        require(not rel.is_absolute() and '..' not in rel.parts, 'unsafe checksum path')
-        path = assets / rel
-        require(path.is_file() and sha(path) == match.group(1), f'checksum mismatch: {rel}')
+    if REPO == 'treeforge_bootstrap_framebuffer':
+        verify_framebuffer_assets(assets, tag)
+    else:
+        for line in sums.read_text().splitlines():
+            if not line.strip():
+                continue
+            match = re.fullmatch(r'([a-f0-9]{64})\s+\*?(.+)', line)
+            require(match is not None, 'malformed SHA256SUMS line')
+            rel = Path(match.group(2))
+            require(not rel.is_absolute() and '..' not in rel.parts, 'unsafe checksum path')
+            path = assets / rel
+            require(path.is_file() and sha(path) == match.group(1), f'checksum mismatch: {rel}')
     print(f'STAGED_ASSETS=PASS COUNT={len(files)}')
     return files
 
