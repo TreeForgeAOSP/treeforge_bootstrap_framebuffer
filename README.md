@@ -22,7 +22,7 @@ Release packages the exact current development provider into `out/releases/<vers
 
 ## License
 
-TreeForge-owned userspace, host tooling, tests, documentation, and
+TreeForge-owned userspace, host tooling, documentation, and
 provider metadata are licensed under Apache-2.0.
 
 Linux kernel patch material under `kernel/` is licensed under

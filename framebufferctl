@@ -140,7 +140,6 @@ def _checksum_members(data: dict[str, object]) -> list[str]:
         "LICENSES/GPL-2.0-only.txt",
         "provider.json",
         "framebufferctl",
-        "tests/test_provider.py",
     ]
     members.extend(relative for relative, _ in expected_files(data))
     return sorted(set(members))
