@@ -359,6 +359,13 @@ def update_next_version(published_tag: str) -> None:
             'post-publish worktree is not clean')
     originals: dict[Path, str] = {version_file(): raw}
     files = ['VERSION']
+    if REPO == 'treeforge_bootstrap_framebuffer':
+        # Framebuffer's build contract binds VERSION to these checksummed files.
+        # The next development commit must carry them together, not only VERSION.
+        files.extend(['README.md', 'provider.json', 'SHA256SUMS'])
+        for name in files[1:]:
+            path = ROOT / name
+            originals[path] = path.read_text(encoding='utf-8')
     if REPO == 'treeforge_manager':
         code = ROOT / 'ANDROID_VERSION_CODE'
         code_raw = code.read_text()
@@ -369,6 +376,11 @@ def update_next_version(published_tag: str) -> None:
         version_file().write_text(changed)
         if REPO == 'treeforge_manager':
             code.write_text(f'{int(originals[code].strip()) + 1}\n')
+        if REPO == 'treeforge_bootstrap_framebuffer':
+            # Match the component's existing build/sync behavior. Never mutate
+            # the published provider or already prepared release assets.
+            cmd([str(ROOT / 'framebufferctl'), 'sync'])
+            cmd([str(ROOT / 'framebufferctl'), 'verify'])
         git('add', '--', *files)
         # Do not permit repository-local hooks to rebuild during a release.
         cmd(['git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m',
