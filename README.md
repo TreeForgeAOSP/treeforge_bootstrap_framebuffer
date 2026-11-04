@@ -1,4 +1,4 @@
-# TreeForge Bootstrap Framebuffer — v1.0b1
+# TreeForge Bootstrap Framebuffer — v1.0b2
 
 Framebuffer provider for TreeForge Bootstrap on Pixel Tablet (`tangorpro`).
 
